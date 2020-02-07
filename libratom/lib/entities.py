@@ -3,6 +3,8 @@
 Set of utility functions that use spaCy to perform named entity recognition
 """
 
+import cProfile, pstats, io
+from pstats import SortKey
 import logging
 import multiprocessing
 from datetime import datetime
@@ -83,6 +85,9 @@ def extract_entities(
 
     # Load the file_report table for local lookup
     _file_reports = session.query(FileReport).all()  # noqa: F841
+
+    pr = cProfile.Profile()
+    pr.enable()
 
     # Start of multiprocessing
     with multiprocessing.Pool(processes=jobs, initializer=worker_init) as pool:
@@ -202,5 +207,12 @@ def extract_entities(
             pool.join()
 
             return 1
+
+    pr.disable()
+    s = io.StringIO()
+    sortby = SortKey.CUMULATIVE
+    ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+    ps.print_stats()
+    print(s.getvalue())
 
     return 0
