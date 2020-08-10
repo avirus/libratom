@@ -9,7 +9,10 @@ from datetime import datetime
 from io import IOBase
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple, Union
-
+import email
+from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
+import re
 import pypff
 from treelib import Tree
 
@@ -182,7 +185,8 @@ class PffArchive(Archive):
             A string
         """
 
-        body = message.plain_text_body or message.rtf_body or message.html_body
+        # changed default behavior from plain text to html body
+        body = message.html_body or message.rtf_body or message.plain_text_body
 
         if not body:
             # Return headers only
@@ -198,6 +202,68 @@ class PffArchive(Archive):
 
         return f"{headers}Body-Type: plain-text\r\n\r\n{body}"
 
+    def try_decode_b64(html) -> str:
+        html1 = html
+        if html:
+            try:
+                html = base64.b64decode(html, validate=True)
+            except Exception as exc:
+                print("no correct base64")
+                print(html1)
+                html = html1
+        return html
+    
+    @staticmethod
+    def format_message_with_attachments(message: pypff.message) -> str:
+        """reconstruct EML (with all attachments and inline images)
+                   from a pypff.message object, return a string
+                Args:
+                    message: A pypff.message object
+                Returns:
+                    A string
+                """
+        email1 = format_message(message, True)
+        #  parse to EmailMessage object
+        eml = email.message_from_string(email1, policy=email.policy.default)
+        # create new EmailMessage. workaround with headers
+        msg = EmailMessage()
+        # copy headers except few, they can cause problems with attachments
+        for item in eml.keys():
+            if item not in ("Content-Type", "Content-Transfer-Encoding", "Body-Type"):
+                msg[item] = eml[item]
+        content = eml.get('content')
+        if content is not None:
+            msg.set_content(content)
+        html = eml.get_payload()
+        # workaround
+        html = try_decode_b64(html)
+        msg.add_alternative(html, subtype='html')
+        # add attachments to new object
+        if message.number_of_attachments > 0:
+            msg.make_mixed()
+            for i in range(0, message.number_of_attachments):
+                em = message.get_attachment(i)
+                att_name = str(em.get_name())
+                siz = em.get_size()
+                encoded_content = em.read_buffer(siz)
+                if ('.jpg' not in att_name) and ('.png' not in att_name) and ('.jpeg' not in att_name):
+                    att1 = MIMEApplication(encoded_content)
+                    # workaround for national characters support
+                    att1.add_header('Content-Disposition', 'attachment; filename="%s"' % att_name)
+                    msg.attach(att1)
+                else:
+                    # this is image, check if we need to add additional headers (CID)
+                    msg_image = MIMEImage(encoded_content, name=att_name)
+                    try:
+                        cid = att_name + re.search('cid:' + att_name + '(.+?)\" alt', html).group(1)
+                        msg_image.add_header('Content-ID', '<' + cid + '>')
+                        msg_image.add_header('X-Attachment-Id', cid)
+                    except Exception as exc:
+                        cid = ""
+                    msg.attach(msg_image)
+        eml = msg.as_string()
+        return eml
+    
     @staticmethod
     def get_message_body(message: pypff.message) -> Tuple[str, Optional[BodyType]]:
         """Takes a pypff.message object and returns a body and body type
